@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: foreman-waitlist
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: ADMIN_KEY
+        sync: false
+      - key: BASE_COUNT
+        value: "214"
+    disk:
+      name: waitlist-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
