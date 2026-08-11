@@ -5,10 +5,17 @@ const path = require('path');
 const fs = require('fs');
 const rateLimit = require('express-rate-limit');
 
+const os = require('os');
+
 const PORT = process.env.PORT || 3000;
 const ADMIN_KEY = process.env.ADMIN_KEY || 'changeme';
 const BASE_COUNT = parseInt(process.env.BASE_COUNT || '214', 10); // vanity offset shown on the landing page
-const DB_PATH = path.join(__dirname, 'data', 'waitlist.json');
+
+// Use the OS temp directory for storage — guaranteed writable on every host
+// (Render, Railway, etc.), unlike an app-relative folder which can be
+// read-only depending on how the platform mounts your code.
+// NOTE: this is ephemeral storage — see README "Scaling up" for a permanent option.
+const DB_PATH = path.join(os.tmpdir(), 'foreman-data', 'waitlist.json');
 
 // ---------- tiny JSON file "database" ----------
 // Fine for a waitlist at launch scale. Swap for Postgres/Supabase/etc.
@@ -63,6 +70,7 @@ async function notifyNewSignup(email, number) {
 
 // ---------- app setup ----------
 const app = express();
+app.set('trust proxy', 1); // Render (and most hosts) sit behind a reverse proxy — required for rate limiting and req.ip to work
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -80,45 +88,55 @@ const waitlistLimiter = rateLimit({
 
 // Join the waitlist
 app.post('/api/waitlist', waitlistLimiter, async (req, res) => {
-  const emailRaw = (req.body && req.body.email ? String(req.body.email) : '').trim().toLowerCase();
+  try {
+    const emailRaw = (req.body && req.body.email ? String(req.body.email) : '').trim().toLowerCase();
 
-  if (!emailRe.test(emailRaw)) {
-    return res.status(400).json({ error: 'That email address looks invalid.' });
-  }
+    if (!emailRe.test(emailRaw)) {
+      return res.status(400).json({ error: 'That email address looks invalid.' });
+    }
 
-  const db = readDb();
-  const existing = db.entries.find((e) => e.email === emailRaw);
+    const db = readDb();
+    const existing = db.entries.find((e) => e.email === emailRaw);
 
-  if (existing) {
-    return res.status(200).json({
-      alreadyOnList: true,
-      number: existing.number,
+    if (existing) {
+      return res.status(200).json({
+        alreadyOnList: true,
+        number: existing.number,
+      });
+    }
+
+    const number = String(db.entries.length + 1).padStart(4, '0');
+    const entry = {
+      email: emailRaw,
+      number,
+      ts: new Date().toISOString(),
+      ip: req.ip,
+    };
+
+    db.entries.push(entry);
+    writeDb(db);
+
+    notifyNewSignup(emailRaw, number); // fire and forget
+
+    return res.status(201).json({
+      alreadyOnList: false,
+      number,
     });
+  } catch (err) {
+    console.error('Waitlist signup failed:', err);
+    return res.status(500).json({ error: 'Server error while saving your signup. Please try again.' });
   }
-
-  const number = String(db.entries.length + 1).padStart(4, '0');
-  const entry = {
-    email: emailRaw,
-    number,
-    ts: new Date().toISOString(),
-    ip: req.ip,
-  };
-
-  db.entries.push(entry);
-  writeDb(db);
-
-  notifyNewSignup(emailRaw, number); // fire and forget
-
-  return res.status(201).json({
-    alreadyOnList: false,
-    number,
-  });
 });
 
 // Live count for the landing page counter
 app.get('/api/waitlist/count', (req, res) => {
-  const db = readDb();
-  res.json({ count: db.entries.length, displayCount: BASE_COUNT + db.entries.length });
+  try {
+    const db = readDb();
+    res.json({ count: db.entries.length, displayCount: BASE_COUNT + db.entries.length });
+  } catch (err) {
+    console.error('Fetching count failed:', err);
+    res.status(500).json({ error: 'Server error while fetching count.' });
+  }
 });
 
 // Admin: export all signups as CSV. Protect with ?key=ADMIN_KEY
